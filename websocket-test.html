@@ -1,0 +1,13 @@
+<!DOCTYPE html>
+<head>
+<meta charset="utf-8" />
+<title>WebSocket Test</title>
+<script language="javascript" type="text/javascript">
+websocket = new WebSocket("ws://localhost:9000/feed/kitteh");
+websocket.onopen = function(e) { console.log("open", e)}
+websocket.onclose = function(e) { console.log("close", e)}
+websocket.onmessage = function(e) { console.log("message", e.data, e)}
+websocket.onerror = function(e) { console.log("error", e.data, e)}
+</script>
+</head>
+</html>
