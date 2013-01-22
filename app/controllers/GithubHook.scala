@@ -6,7 +6,8 @@ import play.api.libs.iteratee._
 import play.api.libs.iteratee.Input._
 import play.api.libs.iteratee.Done
 import play.api.libs.json._
-import akka.actor.ActorRef
+import akka.actor.{ActorRef, ActorSystem}
+import akka.event.Logging
 import hub.HubActor
 
 object GithubHook {
@@ -91,11 +92,14 @@ object GithubHook {
   }
 }
 
-class GithubHook(hub: ActorRef) extends Controller {
+class GithubHook(system: ActorSystem, hub: ActorRef) extends Controller {
   import GithubHook._
+  val log = Logging(system, "/hook/github")
 
   def index = Action(eventParser) { request =>
-    handlingForEvent(request.body).foreach(hub ! _)
+    val handling = handlingForEvent(request.body)
+    log.debug("Handling " + request.body + " with " + handling)
+    handling.foreach(hub ! _)
     Ok("")
   }
 

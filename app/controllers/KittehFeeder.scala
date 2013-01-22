@@ -3,25 +3,29 @@ package controllers
 import play.api._
 import play.api.mvc._
 import play.api.libs.concurrent.Akka
-import play.api.libs.concurrent.{Promise => PlayPromise, AkkaPromise => PlayAkkaPromise}
+import play.api.libs.concurrent.{Promise, AkkaPromise}
 import play.api.libs.iteratee._
 import play.api.libs.iteratee.Enumerator.Pushee
 import akka.actor._
-import akka.dispatch.{ExecutionContext, Promise => AkkaPromise}
+import akka.dispatch.ExecutionContext
+import akka.event.Logging
+import akka.pattern.ask
+import akka.util.duration._
+import akka.util.Timeout
 import hub.HubActor
 import hub.HubActor._
 
 object FeedMaster {
-
-  case class EstablishFeed(enumeratorPromise: AkkaPromise[Enumerator[CheckPullRequest]])
-
+  case object EstablishFeed
+  case class FeedEnumerator(enumerator: Enumerator[CheckPullRequest])
 }
 
-class FeedMaster(hub: ActorRef) extends Actor {
+class FeedMaster(hub: ActorRef) extends Actor with ActorLogging {
   import FeedMaster._
   import FeedActor._
   def receive = {
-    case EstablishFeed(enumeratorPromise) => {
+    case EstablishFeed => {
+      log.debug("Master establishing feed")
       val feeder = context.actorOf(Props[FeedActor])
       val enumerator = Enumerator.pushee[CheckPullRequest](
         // onStart
@@ -32,7 +36,7 @@ class FeedMaster(hub: ActorRef) extends Actor {
         (msg, in) => feeder ! ConnectionError(msg)
       )
       hub ! RegisterListener(feeder)
-      enumeratorPromise.complete(Right(enumerator))
+      sender ! FeedEnumerator(enumerator)
     }
   }
 }
@@ -68,24 +72,26 @@ class FeedActor extends Actor with FSM[FeedActor.ConnectionState, Option[Pushee[
 }
 
 class KittehFeeder(system: ActorSystem, hub: ActorRef) extends Controller {
+  val log = Logging(system, "/feed/kitteh")
 
   implicit private val executionContext = system.dispatcher
 
   val master = system.actorOf(Props(new FeedMaster(hub)), "feedmaster")
 
   /** Make a promised Enumerator available immediately. */
-  private def flattenPromisedEnumerator[E](futEnum: PlayPromise[Enumerator[E]]): Enumerator[E] = new Enumerator[E] {
-    def apply[A](i: Iteratee[E, A]): PlayPromise[Iteratee[E, A]] = futEnum.flatMap(_.apply(i))
+  private def flattenPromisedEnumerator[E](futEnum: Promise[Enumerator[E]]): Enumerator[E] = new Enumerator[E] {
+    def apply[A](i: Iteratee[E, A]): Promise[Iteratee[E, A]] = futEnum.flatMap(_.apply(i))
   }
 
   private def establishFeed(implicit executor: ExecutionContext): Enumerator[CheckPullRequest] = {
-    val enumeratorAkkaPromise = AkkaPromise[Enumerator[CheckPullRequest]]
-    val enumeratorPlayPromise = new PlayAkkaPromise(enumeratorAkkaPromise)
-    master ! FeedMaster.EstablishFeed(enumeratorAkkaPromise)
-    flattenPromisedEnumerator(enumeratorPlayPromise)
+    log.debug("Establishing feed")
+    implicit val timeout = Timeout(5 seconds)
+    val feedFuture = (master ? FeedMaster.EstablishFeed).mapTo[FeedMaster.FeedEnumerator]
+    flattenPromisedEnumerator(new AkkaPromise(feedFuture.map(_.enumerator)))
   }
 
   def index = WebSocket.using[String] { request =>
+    log.debug("Kitteh connection")
     val in = Iteratee.consume[String]()
     val out = establishFeed.map {
       case CheckPullRequest(user, repo, number) => user + "," + repo + "," + number // FIXME: Verify/escape input
